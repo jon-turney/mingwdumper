@@ -2,7 +2,6 @@
 #include <elf.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <link.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -10,6 +9,8 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <stdint.h>
+
+#include <map>
 
 
 #define printhex(description, value) printf("%s: %#x\n", description, value)
@@ -60,23 +61,21 @@ struct PeOptionalHeader {
 };
 
 #define IMAGE_SIZEOF_SHORT_NAME 8
-typedef unsigned char BYTE;
-typedef uint32_t DWORD;
-typedef uint16_t WORD;
+
 struct IMAGE_SECTION_HEADER {
-  BYTE  Name[IMAGE_SIZEOF_SHORT_NAME];
+  char  Name[IMAGE_SIZEOF_SHORT_NAME];
   union {
-    DWORD PhysicalAddress;
-    DWORD VirtualSize;
-  } Misc;
-  DWORD VirtualAddress;
-  DWORD SizeOfRawData;
-  DWORD PointerToRawData;
-  DWORD PointerToRelocations;
-  DWORD PointerToLinenumbers;
-  WORD  NumberOfRelocations;
-  WORD  NumberOfLinenumbers;
-  DWORD Characteristics;
+    uint32_t PhysicalAddress;
+    uint32_t VirtualSize;
+  } ;
+  uint32_t VirtualAddress;
+  uint32_t SizeOfRawData;
+  uint32_t PointerToRawData;
+  uint32_t PointerToRelocations;
+  uint32_t PointerToLinenumbers;
+  uint16_t NumberOfRelocations;
+  uint16_t NumberOfLinenumbers;
+  uint32_t Characteristics;
 };
 
 struct __attribute__ ((__packed__))  PeSymbol
@@ -118,17 +117,19 @@ int main(int argc, char** argv)
     void* obj_base = mmap(NULL, st.st_size, PROT_READ | PROT_WRITE, MAP_PRIVATE, obj_fd, 0);
     printhex("obj_base", obj_base);
 
-    // offset 0x3c - find the real start of peheader here
+    // offset 0x3c - find offset to PE signature
     int32_t* peOffsetPtr = (int32_t*) ( (int32_t*) obj_base + 60/4);
-    printhex("peOffsetPtr", peOffsetPtr);
-
-    // real offset
-    printhex("real offset", *peOffsetPtr);
+    printhex("signature offset", *peOffsetPtr);
+    if (*peOffsetPtr > st.st_size)
+      printf("invalid pe signature offset\n");
 
     // pe header
     PeHeader* peHeader = (PeHeader*) ((uint32_t*)obj_base+((*peOffsetPtr)/4));
     printhex("PeHeader Address", peHeader);
     printhex("mmagic", peHeader->mMagic);
+
+    if (peHeader->mMagic != 0x00004550)
+      printf("invalid pe signature\n");
 
     // optional pe header
     PeOptionalHeader* peOptionalHeader = (PeOptionalHeader*) ( (int32_t*) peHeader + 6);;
@@ -143,35 +144,82 @@ int main(int argc, char** argv)
     printhex("peOptionalHeader + SizeOfOptionalHeader", peOptionalHeaderOffset + peHeader->mSizeOfOptionalHeader);
 
     int64_t sectionHeaderOffset = peOptionalHeaderOffset + peHeader->mSizeOfOptionalHeader;
-    IMAGE_SECTION_HEADER* foobar = (IMAGE_SECTION_HEADER*) ((uint32_t*)obj_base+(sectionHeaderOffset/4));
+    IMAGE_SECTION_HEADER* section_table = (IMAGE_SECTION_HEADER*) ((uint32_t*)obj_base+(sectionHeaderOffset/4));
 
-    for(int i=0;i<peHeader->mNumberOfSections;i++)
+    printf("sizeof(PeSymbol) = %d\n", sizeof(PeSymbol));
+    printf("peHeader->mPointerToSymbolTable = %x\n", peHeader->mPointerToSymbolTable);
+    printf("peHeader->mNumberOfSymbols = %d\n", peHeader->mNumberOfSymbols);
+
+    // string table immediately follows symbol table
+    uint32_t string_table_offset = peHeader->mPointerToSymbolTable + peHeader->mNumberOfSymbols*sizeof(PeSymbol);
+    char *string_table = (char *)obj_base + string_table_offset;
+    uint32_t string_table_length = *(uint32_t *)string_table;
+
+    printf("string_table offset %x\n", string_table_offset);
+    printf("string_table length %d\n", string_table_length);
+
+    // string table index to pointer map
+    std::map<unsigned int, char *> string_table_map;
+
+    int i, offset;
+    for (i = 0, offset = 4;
+         offset < string_table_length;
+         i++, offset += strlen(string_table+offset)+1)
+      {
+        //printf("%i: %s, length %d\n", i, string_table+offset, strlen(string_table+offset)+1);
+
+        // stash pointer for later access via string table index
+        string_table_map[i] = string_table+offset;
+      }
+    printf("%d strings\n", i-1);
+
+    // dump out section table
+    for (int s = 0; s < peHeader->mNumberOfSections; s++)
+      {
+        printf("section name: %.8s", section_table[s].Name);
+
+        // long section name, look up in string table
+        if (section_table[s].Name[0] == '/')
+          {
+            int offset = atoi(section_table[s].Name+1);
+
+            if (offset > string_table_length)
+              printf(" offset exceeds string table length");
+            else
+              printf(" = %s", string_table + offset);
+          }
+
+        printf("\n");
+        printf("Virtual Size %08x Virtual Address Offset %08x, Raw Size %08x, File Offset %08x, Characteristics %08x\n",
+               section_table[s].VirtualSize,
+               section_table[s].VirtualAddress,
+               section_table[s].SizeOfRawData,
+               section_table[s].PointerToRawData,
+               section_table[s].Characteristics);
+      }
+
+#if 0
+    // dump out symbol table
+    PeSymbol* symbols = (PeSymbol*) ((int32_t*) obj_base + (peHeader->mPointerToSymbolTable/4));
+    for (unsigned int i = 0; i < peHeader->mNumberOfSymbols; i++)
     {
-        printf("section name:  %.8s\n", foobar[i].Name);
+      printf("symbol name: ");
+
+      if (symbols[i].n_first4bytes == 0)
+        {
+          offset = symbols[i].n_second4bytes;
+
+            if (offset > string_table_length)
+              printf("offset %#x exceeds string table length", offset);
+            else
+              printf("%s (offset %#x)", string_table + offset, offset);
+        }
+      else
+        printf("%.8s", symbols[i].n_name);
+
+      printf("\n");
+
+      i = i + symbols[i].n_numaux;
     }
-
-
-    PeSymbol* symbols = (PeSymbol*) ((int32_t*) obj_base + peHeader->mPointerToSymbolTable/4);
-    for(uint i=0;i<peHeader->mNumberOfSymbols;i++)
-    {
-
-        if( symbols[i].n_first4bytes == 0)
-            printf("symbol name: too long, offset %#x\n", symbols[i].n_second4bytes);
-        else
-            printf("symbol name:  %s\n", symbols[i].n_name);
-    }
-
-
-    //     String Table Offset = File Header.f_symptr + File Header.f_symptr * sizeof( Symbol Table Entry )
-//                         = File Header.f_symptr + File Header.f_symptr * 18
-
-//     uint64_t string_table_offset = (uint64_t) (&(symbols[peHeader->mNumberOfSymbols]) - (uint64_t) obj_base) + 1;
-//     printhex("string_table_offset", string_table_offset);
-//
-//     string_table_offset = (uint64_t) peh->mPointerToSymbolTable + (uint64_t) peh->mNumberOfSymbols * 18;
-//     printhex("string_table_offset based on formula", string_table_offset);
-//
-//
-//     printf("string table: %s\n", ((uint32_t*)obj_base+(string_table_offset)));// symbols[peh->mNumberOfSymbols+1]);
-
+#endif
 }
