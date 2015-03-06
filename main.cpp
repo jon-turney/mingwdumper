@@ -174,9 +174,10 @@ int main(int argc, char** argv)
     printf("%d strings\n", i-1);
 
     // dump out section table
+    printf("Name                      VirtSize   VMA        RawSize    Offset     Flags\n");
     for (int s = 0; s < peHeader->mNumberOfSections; s++)
       {
-        printf("section name: %.8s", section_table[s].Name);
+        printf("%8.8s", section_table[s].Name);
 
         // long section name, look up in string table
         if (section_table[s].Name[0] == '/')
@@ -186,11 +187,14 @@ int main(int argc, char** argv)
             if (offset > string_table_length)
               printf(" offset exceeds string table length");
             else
-              printf(" = %s", string_table + offset);
+              printf(" %-16s ", string_table + offset);
+          }
+        else
+          {
+            printf("                  ");
           }
 
-        printf("\n");
-        printf("Virtual Size %08x Virtual Address Offset %08x, Raw Size %08x, File Offset %08x, Characteristics %08x\n",
+        printf("%08x   %08x   %08x   %08x   %08x\n",
                section_table[s].VirtualSize,
                section_table[s].VirtualAddress,
                section_table[s].SizeOfRawData,
